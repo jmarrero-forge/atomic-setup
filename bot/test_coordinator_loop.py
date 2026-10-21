@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -1725,6 +1726,75 @@ class CleanTest(unittest.TestCase):
         self.assertEqual([e for e in kept if os.path.exists(os.path.join(archive, e, "auth.json"))], [])
         self.assertEqual(os.stat(archive).st_mode & 0o777, 0o700)  # private
 
+    def test_the_archived_database_keeps_no_login(self):
+        token = "gho_" + "s3cret" * 4
+        data = os.path.join(self.home, ".local", "share", "opencode")
+        archive = os.path.join(self.tmp.name, "archive")
+        os.makedirs(data)
+
+        def database(path, wal):
+            db = sqlite3.connect(path)
+            if wal:
+                db.execute("PRAGMA journal_mode = WAL")
+                db.execute("PRAGMA wal_autocheckpoint = 0")
+            db.execute("CREATE TABLE credential (id TEXT, value TEXT)")
+            db.execute("CREATE TABLE account (id TEXT, access_token TEXT)")
+            db.execute("CREATE TABLE session_v2 (id TEXT, title TEXT)")
+            db.execute("INSERT INTO credential VALUES ('c', ?)", (json.dumps({"refresh": token}),))
+            db.execute("INSERT INTO account VALUES ('a', ?)", (token,))
+            db.execute("INSERT INTO session_v2 VALUES ('s', 'kept history')")
+            db.commit()
+            return db
+        cases = [
+            # name, how the database was left: closed, or mid-write with its log (a killed opencode)
+            ("closed", False),
+            ("its write-ahead log not yet checkpointed", True),
+        ]
+        for name, wal in cases:
+            with self.subTest(name):
+                shutil.rmtree(archive, ignore_errors=True)
+                staging = os.path.join(self.tmp.name, "staging")
+                shutil.rmtree(staging, ignore_errors=True)
+                os.makedirs(staging)
+                db = database(os.path.join(staging, "opencode.db"), wal)
+                # Copied while still open: as a killed process leaves it.
+                for f in os.listdir(staging):
+                    shutil.copy(os.path.join(staging, f), os.path.join(data, f))
+                db.close()
+                if wal:
+                    self.assertTrue(os.path.exists(os.path.join(data, "opencode.db-wal")))
+                cl.clean([], [], {}, {}, ["~/.local/share/opencode"], archive, "s",
+                         {"opencode.db": ["credential", "account", "control_account"]})
+                archived = os.path.join(archive, "s-opencode")
+                self.assertEqual(os.listdir(archived), ["opencode.db"])  # no log left
+                db = sqlite3.connect(os.path.join(archived, "opencode.db"))
+                self.assertEqual(db.execute("SELECT count(*) FROM credential").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT count(*) FROM account").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT title FROM session_v2").fetchall(), [("kept history",)])
+                db.close()
+                with open(os.path.join(archived, "opencode.db"), "rb") as f:
+                    self.assertNotIn(token.encode(), f.read())
+                self.assertEqual(os.listdir(data), [])
+
+    def test_a_database_that_cant_be_scrubbed_isnt_archived(self):
+        self.files(".local/share/opencode/log/x.log")
+        with open(os.path.join(self.home, ".local/share/opencode/opencode.db"), "w") as f:
+            f.write("not a database, but maybe a login")
+        archive = os.path.join(self.tmp.name, "archive")
+        cl.clean([], [], {}, {}, ["~/.local/share/opencode"], archive, "s", {"opencode.db": ["credential"]})
+        self.assertEqual(os.listdir(os.path.join(archive, "s-opencode")), ["log"])
+        # A write-ahead log without its database goes too.
+        self.files(".local/share/opencode/opencode.db-wal", ".local/share/opencode/log/x.log")
+        cl.clean([], [], {}, {}, ["~/.local/share/opencode"], archive, "t", {"opencode.db": ["credential"]})
+        self.assertEqual(os.listdir(os.path.join(archive, "t-opencode")), ["log"])
+
+    def test_scrub_takes_only_file_and_table_names(self):
+        base = 'name = "x"\ncommand = ["x"]\n'
+        for scrub in ['{ "a/b.db" = ["credential"] }', '{ "x.db" = ["credential; DROP"] }', '{ "x.db" = [] }',
+                      '{ ".." = ["credential"] }']:
+            with self.subTest(scrub), self.assertRaises(cl.ConfigError):
+                cl.Backend(tomllib.loads(base + f"scrub = {scrub}\n"), "backend", [])
+
     def archive_setup(self):
         self.files(".local/share/opencode/opencode.db")
         data = os.path.join(self.home, ".local", "share", "opencode")
@@ -1895,7 +1965,7 @@ class CleanTest(unittest.TestCase):
             sw.tick(T0)
             self.assertEqual(world.backends(), ["opencode"])
             cleaned.assert_called_once_with(["CLEANED"], [], {}, env, [], os.path.join(d, "archive", "opencode"),
-                                            mock.ANY)
+                                            mock.ANY, {})
             # A clean that fails: no start; held after three, then the loop ends.
             world.running.clear()
             world.alive = False

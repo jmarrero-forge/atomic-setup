@@ -15,9 +15,10 @@
 # env: extra variables for its session.
 # clean: files and directories emptied before each start, so that nothing a
 #   session left there carries over; archive: moved aside (the 5 newest
-#   kept) and made afresh; keep: regular files that survive either; relink:
-#   links (link = target) created afresh. Paths take ${VAR:-default}. If
-#   any of that fails, so does the start.
+#   kept) and made afresh; keep: regular files that survive either; scrub:
+#   SQLite databases in an archived directory (file name = [tables]) whose
+#   tables are emptied there; relink: links (link = target) created afresh.
+#   Paths take ${VAR:-default}. If any of that fails, so does the start.
 # notes: Markdown appended to the coordinator skill while it runs, found
 #   next to this file, else in /usr/local/share/bot-coordinator/.
 # probe: where its usage comes from: "file" (bot-heartbeat statusline's

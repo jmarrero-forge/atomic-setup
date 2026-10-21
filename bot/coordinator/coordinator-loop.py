@@ -59,6 +59,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -161,6 +162,8 @@ STOP_FAILURES_MAX = 6
 # How many of a backend's earlier data directories are kept (archive), and
 # the most bytes they may take together.
 ARCHIVE_KEEP = 5
+# Table names a backend's scrub may empty.
+SQL_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 ARCHIVE_MAX_BYTES = 2 * 1024 ** 3
 # After this many failed starts in a row a backend is held like one whose
 # session ended at once, and another is tried.
@@ -190,7 +193,7 @@ PROBE_TYPES = {
     "none": (set(), set(), 600, 0),
 }
 BACKEND_KEYS = {"name", "command", "requires_env", "env", "notes", "leave_at", "return_below", "probe",
-                "proved_by_reading", "clean", "archive", "keep", "relink"}
+                "proved_by_reading", "clean", "archive", "keep", "relink", "scrub"}
 TOP_KEYS = {"handoff_timeout_minutes", "min_dwell_minutes", "start_ack_timeout_minutes", "backend"}
 
 
@@ -294,6 +297,12 @@ class Backend:
         self.relink = spec.get("relink", {})
         if not (isinstance(self.relink, dict) and all(isinstance(v, str) and v for v in self.relink.values())):
             raise ConfigError(f"{where}: relink must be a table of link = target paths")
+        self.scrub = spec.get("scrub", {})
+        if not (isinstance(self.scrub, dict)
+                and all(re.fullmatch(r"[^/]+", name) and name not in (".", "..") for name in self.scrub)
+                and all(isinstance(v, list) and v and all(isinstance(x, str) and SQL_NAME_RE.fullmatch(x) for x in v)
+                        for v in self.scrub.values())):
+            raise ConfigError(f"{where}: scrub must be a table of database file name = [table names]")
         self.leave_at = percent(spec, "leave_at", DEFAULT_LEAVE_AT, where)
         self.return_below = percent(spec, "return_below", DEFAULT_RETURN_BELOW, where)
         if self.return_below > self.leave_at:
@@ -722,11 +731,13 @@ def mark_time(value):
     return parse_time(value)
 
 
-def clean(paths, keep=(), relink=None, environ=None, archive=(), archive_dir=None, stamp=None):
+def clean(paths, keep=(), relink=None, environ=None, archive=(), archive_dir=None, stamp=None, scrub=None):
     """Prepares a backend's files for its start:
 
     - ARCHIVE: each path is moved into ARCHIVE_DIR as STAMP-NAME (only the
       ARCHIVE_KEEP newest are kept there), and made afresh;
+    - SCRUB: {file name: [tables]}: SQLite databases in an archived
+      directory whose tables (the logins) are emptied there;
     - PATHS: each is emptied (a directory) or removed (a file);
     - KEEP: full paths of regular files (not directories or symlinks)
       that survive either: kept in place, or copied back from the archive;
@@ -811,7 +822,10 @@ def clean(paths, keep=(), relink=None, environ=None, archive=(), archive_dir=Non
             os.makedirs(archive_dir, mode=0o700, exist_ok=True)
             prune_archive(archive_dir, tree_size(path))
             # A rename, or a copy and delete across file systems.
-            shutil.move(path, os.path.join(archive_dir, f"{stamp}-{os.path.basename(path)}"))
+            archived = os.path.join(archive_dir, f"{stamp}-{os.path.basename(path)}")
+            shutil.move(path, archived)
+            for name, tables in (scrub or {}).items():
+                scrub_database(os.path.join(archived, name), tables)
         except OSError as e:
             errors.append(f"{path}: {e.strerror or e}")
         finally:
@@ -845,6 +859,39 @@ def clean(paths, keep=(), relink=None, environ=None, archive=(), archive_dir=Non
             errors.append(f"{link}: {e.strerror or e}")
     if errors:
         raise OSError("couldn't clean " + "; ".join(errors))
+
+
+def scrub_database(path, tables):
+    """Empties TABLES in the SQLite database PATH, where they exist, and
+    rewrites it so that their rows are gone from the file too. A database
+    that can't be scrubbed is removed instead: an archive must not keep a
+    login. Its write-ahead log goes with it either way, also when the
+    database itself is missing."""
+    if os.path.islink(path) or (os.path.lexists(path) and not os.path.isfile(path)):
+        return
+    try:
+        if not os.path.lexists(path):
+            raise FileNotFoundError(path)
+        db = sqlite3.connect(path, isolation_level=None)
+        try:
+            db.execute("PRAGMA secure_delete = ON")
+            present = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            for table in tables:
+                if table in present:
+                    db.execute(f'DELETE FROM "{table}"')
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            db.execute("VACUUM")
+        finally:
+            db.close()
+    except FileNotFoundError:
+        pass
+    except sqlite3.Error as e:
+        log(f"warning: couldn't scrub {path} ({e}); removing it from the archive")
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+    for suffix in ("-wal", "-shm", "-journal"):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path + suffix)
 
 
 def move_file(src, dst):
@@ -1293,7 +1340,7 @@ class Switch:
             # plugins: if it can't all go, the start fails.
             clean(backend.clean, backend.keep, backend.relink, self.environ, backend.archive,
                   os.path.join(self.archive_root, name),
-                  f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(now))}-gen{gen}")
+                  f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(now))}-gen{gen}", backend.scrub)
             self.sessions.start(argv, dict(env, **{GENERATION_VAR: str(gen), BACKEND_VAR: name}))
         except Exception as e:
             # Stopped (in case it half started) and started again next tick:
