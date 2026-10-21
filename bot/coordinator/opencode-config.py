@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """Write opencode.json, the opencode coordinator backend's config. The
-image installs it as /etc/opencode/opencode.json, opencode's system-managed
-config, which it loads last: its provider pin always wins. Its builder
-rules can still be outranked by rules a session writes into its own config
-directories, which the loop empties before each start (see README.md). It
-applies to bot-opencode's runs too.
+image installs it as /etc/opencode/opencode.json, opencode's system config,
+which opencode 2 loads after every file a session can write: its settings
+and agents' rules come last, so they win, and its policies evaluate last,
+after every other file's. It applies to bot-opencode's runs too.
 
     opencode-config.py OUT
 
-The config is generated because of the builder agent's bash rules, which
+The policies are rules no other config file can lift (only an OpenCode
+Console organization's can, see README.md): only the Copilot provider (so
+that a missing login doesn't fall back to opencode's own free model), no
+plugins and no MCP servers (code a session could plant in its own config),
+and no question tool, whose dialog would take the next typed message as its
+answer.
+
+The config is generated because of the builder agent's shell rules, which
 stand in for Claude Code's builder hook (homegit's
 dotfiles/.claude/agents/builder.md): opencode has no hooks, only
-permission patterns. opencode 1.18 matches each command of a command line
-(as its shell parser splits it) against every pattern with its
+permission patterns. opencode 2, as 1.18 did, matches each command of a
+command line (as its shell parser splits it) against every pattern with its
 Wildcard.match (* is anything, ? one character, a trailing " *" may also
 match nothing), and the last matching rule wins. So there are only deny
 rules after the "*" allow: an allow after them would let through any
@@ -72,7 +78,8 @@ BUILDER_PROMPT = (
     "diff.")
 
 
-def builder_rules():
+def builder_patterns():
+    """The shell patterns the builder may not run, in order, each once."""
     deny = []
     for start in STARTS:
         for verb in GIT_WRITES:
@@ -96,29 +103,56 @@ def builder_rules():
         deny += [f"{start}{shell}{gap}-*{word}*" for shell in SHELLS for gap in GAPS for word in WRAPPED]
         deny += [f"{start}eval?*{word}*" for word in WRAPPED]
     deny += [f"*bot-{tool}*" for tool in BOT_WRITES] + ["*dco-signoff*"]
-    rules = {"*": "allow"}
-    rules.update((pattern, "deny") for pattern in deny)
-    return rules
+    return list(dict.fromkeys(deny))
+
+
+def rule(action, resource, effect):
+    return {"action": action, "resource": resource, "effect": effect}
+
+
+def builder_rules():
+    """The builder's permissions: no subagents, and every shell command but
+    the denied ones."""
+    return ([rule("subagent", "*", "deny"), rule("shell", "*", "allow")]
+            + [rule("shell", pattern, "deny") for pattern in builder_patterns()])
 
 
 def config():
     return {
         "$schema": "https://opencode.ai/config.json",
-        # Only Copilot: without its login opencode would otherwise fall back
-        # to opencode's own free model.
-        "enabled_providers": ["github-copilot"],
-        # No update prompt and no question tool, whose dialogs would take the
-        # next typed message as their answer; no sharing.
-        "autoupdate": False,
+        "policies": [
+            # Only Copilot: without its login opencode would otherwise fall
+            # back to opencode's own free model.
+            rule("provider.use", "*", "deny"),
+            rule("provider.use", "github-copilot", "allow"),
+            # No plugins or MCP servers: code, which a session could add
+            # to its own config.
+            rule("integration.use", "plugin:*", "deny"),
+            rule("integration.use", "mcp:*", "deny"),
+            # No question tool, whose dialog would take the next typed
+            # message as its answer.
+            rule("tool.use", "question:*", "deny"),
+        ],
+        # The same for the agents' own rules, as opencode 1 had it.
+        "permissions": [rule("question", "*", "deny")],
+        # No updates (and so no update dialog) and no sharing. The CLI's own
+        # update check reads only the global config, so the image also sets
+        # OPENCODE_DISABLE_AUTOUPDATE.
+        "update": "disable",
         "share": "disabled",
-        "permission": {"question": "deny"},
-        # Workers may start their own reviewer.
-        "subagent_depth": 2,
-        "agent": {
+        # The shell and its parser the builder's rules were written against,
+        # whatever a session's own config says.
+        "shell": "/bin/bash",
+        "experimental": {"portable_shell_scanner": False},
+        # No subagent starts one of its own (opencode's default depth, 1), as
+        # under opencode 1, whose subagent_depth 2 never applied: it refused
+        # the task tool to every subagent whose own rules didn't allow it.
+        "agents": {
             "second-opinion": {
                 "mode": "subagent",
-                # Set in the quadlet; opencode fills in {env:...}.
-                "model": "{env:BOT_OPENCODE_REVIEW_MODEL}",
+                # Its model comes from the session's OPENCODE_CONFIG_CONTENT
+                # (backends.toml), from BOT_OPENCODE_REVIEW_MODEL: an
+                # unset variable here would make the model invalid.
                 "description": "A reviewer on a different model family from the coordinator, for the second "
                                "review of every result.",
             },
@@ -128,8 +162,8 @@ def config():
                                "named failing test passing when the fix is local, classify CI failures, bisect "
                                "a build failure. Leaves its changes uncommitted for the caller. Never for "
                                "reviews, design or security questions.",
-                "prompt": BUILDER_PROMPT,
-                "permission": {"task": "deny", "bash": builder_rules()},
+                "system": BUILDER_PROMPT,
+                "permissions": builder_rules(),
             },
         },
     }

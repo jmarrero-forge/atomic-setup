@@ -1,9 +1,10 @@
 #!/bin/bash
 # Log opencode in to GitHub Copilot and store the result as a podman secret,
-# for agents that pass it as OPENCODE_AUTH_CONTENT. Works headless: opencode
-# prints a code to enter at https://github.com/login/device on any browser.
-# Log in there as the account that holds the Copilot license. The token only
-# grants Copilot; revoke it under GitHub Settings -> Applications.
+# for agents that pass it as OPENCODE_AUTH_CONTENT (opencode-copilot hands it
+# to opencode). Works headless: opencode prints a code to enter at
+# https://github.com/login/device on any browser. Log in there as the account
+# that holds the Copilot license. The token only grants Copilot; revoke it
+# under GitHub Settings -> Applications.
 # Usage: bot/copilot-login.sh [secret-name]
 set -euo pipefail
 
@@ -14,9 +15,14 @@ image=localhost/bootc-bot-agent:latest
 tmp=$(mktemp -d "${XDG_RUNTIME_DIR:?}/copilot-login.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
-echo "In the menu, pick GitHub Copilot." >&2
+# opencode 2 keeps the login in its database; the secret holds it in
+# opencode 1's auth.json format, which opencode-copilot reads.
+echo "Pick GitHub.com (or your Enterprise) when asked." >&2
 podman run --rm -it --userns=keep-id:uid=2000,gid=2000 --user 2000:2000 \
-    -v "$tmp:/home/agent/.local/share/opencode:Z" "$image" opencode auth login
+    -v "$tmp:/home/agent/.local/share/opencode:Z" "$image" sh -c \
+    'opencode auth login --standalone github-copilot &&
+     opencode auth export --standalone github-copilot | opencode-copilot --login-from-export \
+         > /home/agent/.local/share/opencode/auth.json'
 
 test -s "$tmp/auth.json" || { echo "error: no login was saved" >&2; exit 1; }
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "github-copilot" in d, sorted(d)' \

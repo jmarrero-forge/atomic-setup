@@ -73,8 +73,12 @@ notes and restart the coordinator to change that. Runs are logged in
 The session runs on one of an ordered list of backends, from
 `~/.config/bot-harness/backends.toml` (default:
 [`backends.toml`](backends.toml), which documents the format): Claude Code
-(`COORDINATOR_MODEL`, `COORDINATOR_EFFORT`), then opencode in its TUI with
-`--auto` (`BOT_OPENCODE_MODEL`, the Copilot login). Each has a launch
+(`COORDINATOR_MODEL`, `COORDINATOR_EFFORT`), then opencode 2 in its TUI
+with `--auto`, on a private server of its own (`--standalone`, not
+opencode's shared background service), with `BOT_OPENCODE_MODEL` and
+`BOT_OPENCODE_REVIEW_MODEL` (both needed, passed in
+`OPENCODE_CONFIG_CONTENT`: the TUI has no `--model`) and the Copilot login
+(which `opencode-copilot` hands it). Each has a launch
 command, the secret it needs, notes for the skill, and a usage probe:
 
 - Claude: the 7-day percent that `bot-heartbeat statusline` saves in
@@ -130,8 +134,8 @@ start that fails 3 times in a row holds that backend for an hour and tries
 the next (with none left, the loop exits and the container restarts).
 
 Each backend's `clean` paths are emptied before it starts (opencode's
-config, cache and data directories; see below), and a failure to do that
-is a failed start.
+config, cache, state and data directories; see below), and a failure to do
+that is a failed start.
 
 A session can also start and not work: a refused model, a dialog, no
 quota. So the first thing `COORDINATOR_PROMPT` and every start note
@@ -165,9 +169,10 @@ off.
 
 opencode's config is [`opencode-config.py`](opencode-config.py)'s output,
 which the image installs as `/etc/opencode/opencode.json`: root-owned, and
-opencode's system-managed config. It pins opencode to the Copilot
-provider, turns off the update prompt, sharing and the `question` tool,
-and defines the `second-opinion` and `builder` agents; it applies to
+opencode's system config. It turns off updates and sharing, defines the
+`second-opinion` and `builder` agents, and holds the policies: only the
+Copilot provider, no plugins, no MCP servers and no `question` tool (whose
+dialog would take the next typed message as its answer). It applies to
 `bot-opencode`'s runs too. To change it, edit the generator and rebuild.
 
 What this protects against is mistakes, not a session that sets out to
@@ -175,39 +180,61 @@ change its own config: the container, its credentials and the trust rules
 are the boundary, as for Claude, and the same user can edit its home, put
 commands first in `PATH` or signal its own processes.
 
-- The provider pin always wins: opencode loads the managed config last,
-  also when the TUI reloads its config (SIGUSR2).
-- The builder rules are merged with those of a session's own config
-  directories, keeping the order their keys first appeared in, so a file
-  there that lists the managed rules first and its own after them
-  outranks them (on opencode 1.19.0, as the check below shows). So before
-  each opencode start the loop empties `~/.opencode` and opencode's config
-  and cache directories (config, agents, plugins, cached packages), and
-  moves its data directory (sessions, logs, and the account state that
-  could pull in a remote config) to
-  `~/.local/state/bot-coordinator/archive/opencode/`, where the 5 newest
-  are kept, within 2 GiB together (the oldest go first; a single entry
-  bigger than that is still kept, so it isn't a hard bound). The login
-  (`auth.json`) is moved out before and back after, so no archive holds
-  it, and is put back even if archiving fails. The
-  paths follow `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME`. It
-  then links the rendered `AGENTS.md` afresh. If anything of that fails
-  (`clean`, `archive`, `keep` and `relink` in `backends.toml`), so does
-  the start, like any other failed start. Project config is off
-  (`OPENCODE_DISABLE_PROJECT_CONFIG`).
+opencode 2 loads the system config after every file a session can write
+(global, project, `.opencode`, agent files, `OPENCODE_CONFIG_CONTENT`), and
+evaluates its policies after theirs. So nothing a session writes outranks
+it, also as opencode reloads config files when they change:
+
+- Agents' rules are lists, joined in load order, last match wins: the
+  builder's rules come after any a session adds, however it orders them.
+  (opencode 1 merged them by key, so a file that listed the managed rules
+  first and its own after outranked them.)
+- Policies can only take things away (a provider, a plugin, a tool), and
+  the system config's come last. The one thing after them is an OpenCode
+  Console organization's policies, which needs a Console login: a fresh
+  database at each start (below) leaves none.
 - [`check-opencode-config.py`](check-opencode-config.py), run in the
-  image after each opencode bump, checks this: planted config of each kind
-  after the clean, and the provider pin after a SIGUSR2 reload; it reports
-  whether the reload picks up a planted builder rule.
-- That protects each start. A session that plants config itself can still
-  get it read later: by a SIGUSR2 reload, or as instructions (the global
-  `AGENTS.md` link's target is re-read on every turn, and an `AGENTS.md`
-  next to a file it reads is attached to it, as Claude Code does with
-  `CLAUDE.md`).
+  image after each opencode bump, checks this: config of each kind planted
+  (a project and a global `opencode.json`, `~/.opencode`, an agent file, a
+  global file that repeats the managed rules and adds its own, a plugin, an
+  MCP server), with project config off and on, with and without the loop's
+  clean, and planted into a running server, must leave the builder
+  refusing `git push`, the `question` tool refused, only the Copilot
+  provider, no plugin or MCP server started, and the login imported.
+
+So for these rules the per-start clean is no longer needed. It stays for
+the rest: the login (opencode 2 keeps it in its database, and takes it
+only into a new one) and what a session could leave that isn't a rule
+(instructions, agents' prompts, commands, cached packages). Before each
+opencode start the loop empties `~/.opencode` and opencode's config, cache
+and state directories, and moves its data directory (its database, with
+the sessions, the login and any account that could pull in a remote
+config, and its logs) to `~/.local/state/bot-coordinator/archive/opencode/`,
+where the 5 newest are kept, within 2 GiB together (the oldest go first; a
+single entry bigger than that is still kept, so it isn't a hard bound). The
+archived database's login and account tables are emptied there (or the
+database is dropped if that fails), so no archive holds the login. An
+opencode 1 `auth.json` found there is moved out first and put back
+(opencode 2 doesn't read it: delete it by hand once). The
+paths follow `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` and
+`XDG_DATA_HOME`. It then links the rendered `AGENTS.md` afresh. If anything
+of that fails (`clean`, `archive`, `scrub`, `keep` and `relink` in
+`backends.toml`), so does the start, like any other failed start. Project
+config is off (`OPENCODE_DISABLE_PROJECT_CONFIG`). Then
+[`opencode-copilot`](../opencode-copilot) imports the login from
+`OPENCODE_AUTH_CONTENT` into the new database (`opencode auth import`) and
+starts opencode.
+
+A session that plants config can still get it used until the next start:
+opencode reloads config as it changes, so planted instructions, agents'
+prompts, formatter commands or a provider's address take effect at once;
+the global `AGENTS.md` link's target is re-read on every turn, and an
+`AGENTS.md` next to a file it reads is attached to it, as Claude Code does
+with `CLAUDE.md`.
 
 Claude Code's `builder` subagent has a hook that refuses commits, pushes
 and GitHub or board writes; under opencode, `builder` is an opencode agent
-whose bash permissions do that job. opencode matches each command of a
+whose shell permissions do that job (and it may not start subagents). opencode matches each command of a
 command line (as its shell parser splits it: `a && b`, `a | b`, `$(b)`
 are separate commands) against every pattern, `*` matching anything and
 `?` one character, and the last match wins. So after the `*` allow there
@@ -257,7 +284,9 @@ $(printf push)`, `sh -c "$CMD"`), four or more spaces or tabs between the
 words, a shell run without options (`bash script.sh`), a script fed to
 a shell through a pipe or a heredoc (`echo 'git push' | sh`, `bash
 <<EOF`), git and gh aliases (`git -c alias.p=push p`), other interpreters
-(`python3 -c`), scripts that run these, or `curl` to the API.
+(`python3 -c`), scripts that run these, or `curl` to the API, or to
+opencode's own server, whose password the session's processes can read
+(to change the session's own rules).
 `bot/test_coordinator_loop.py` checks the rules against opencode's matcher,
 with the reviewers' lists of what must and mustn't pass.
 

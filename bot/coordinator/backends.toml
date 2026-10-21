@@ -58,37 +58,44 @@ probe = { type = "file", path = "~/.cache/bot-heartbeat/rate-limits.json", windo
 
 [[backend]]
 name = "opencode"
+# The TUI on a private server of its own (not opencode's shared background
+# service), with the Copilot login (opencode-copilot); its model comes from
+# OPENCODE_CONFIG_CONTENT below, since the TUI has no --model.
 command = [
-    "opencode", "--auto", "--model", "${BOT_OPENCODE_MODEL}",
+    "opencode-copilot", "--standalone", "--auto",
     ["--prompt", "${COORDINATOR_PROMPT}"],
 ]
 requires_env = ["OPENCODE_AUTH_CONTENT", "BOT_OPENCODE_MODEL"]
 notes = "backend-opencode.md"
-# Before each start, config, agents, plugins and cached packages a session
-# could have left are removed, and its data directory (its sessions, logs,
-# and accounts that could pull in a remote config) is moved aside, to
+# Before each start, config, agents, plugins, cached packages and state a
+# session could have left are removed, and its data directory (its database
+# with the sessions, the logins and accounts that could pull in a remote
+# config, and its logs) is moved aside, to
 # ~/.local/state/bot-coordinator/archive/opencode/ (the 5 newest are kept),
-# but for the login, which OPENCODE_AUTH_CONTENT overrides anyway. The
+# with the logins and accounts emptied from the archived database.
+# opencode-copilot then imports the login into the new database. The
 # rendered AGENTS.md is linked afresh.
 clean = [
     "~/.opencode",
     "${XDG_CONFIG_HOME:-~/.config}/opencode",
     "${XDG_CACHE_HOME:-~/.cache}/opencode",
+    "${XDG_STATE_HOME:-~/.local/state}/opencode",
 ]
 archive = ["${XDG_DATA_HOME:-~/.local/share}/opencode"]
 keep = ["${XDG_DATA_HOME:-~/.local/share}/opencode/auth.json"]
+scrub = { "opencode.db" = ["credential", "account", "control_account"] }
 relink = { "${XDG_CONFIG_HOME:-~/.config}/opencode/AGENTS.md" = "~/.local/share/bot-skills/AGENTS.md" }
 leave_at = 95
 return_below = 50
 probe = { type = "copilot", auth_env = "OPENCODE_AUTH_CONTENT", interval_minutes = 10 }
 
 [backend.env]
-# Workers as background task subagents, which wake the session when done.
-OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = "true"
 # Its config is the image's /etc/opencode/opencode.json (opencode-config.py):
-# only the Copilot provider, no dialogs that would take typed text, the
-# second-opinion and builder agents (see README.md, "The builder under
-# opencode"). opencode loads that system-managed config after everything
-# else, so files the session can write don't override it; no project config
-# at all.
+# only the Copilot provider, no plugins or MCP servers, no dialogs that would
+# take typed text, the second-opinion and builder agents (see README.md, "The
+# builder under opencode"). opencode loads that system config after
+# everything else and evaluates its policies last, so files the session can
+# write don't override it; no project config at all.
 OPENCODE_DISABLE_PROJECT_CONFIG = "true"
+# The models: the session's, and the second-opinion reviewer's.
+OPENCODE_CONFIG_CONTENT = '{"model": "${BOT_OPENCODE_MODEL}", "agents": {"second-opinion": {"model": "${BOT_OPENCODE_REVIEW_MODEL}"}}}'

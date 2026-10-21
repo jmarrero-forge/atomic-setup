@@ -150,7 +150,7 @@ own). Run at most two at once.
   you before it reaches jmarrero. If it fails or wanders off, hand the item
   to a Claude worker and note it in the Why field.
 - The default model is `BOT_OPENCODE_MODEL`; `--model` overrides it
-  (`opencode models github-copilot` lists them).
+  (`bot-opencode --models` lists them).
 
 ### HackMD: use the bot's token only when jmarrero asks
 

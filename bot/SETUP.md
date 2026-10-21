@@ -262,7 +262,8 @@ they're given, so revoke and recreate it if one ever leaks.
        bot/copilot-login.sh
 
    The token only grants Copilot; revoke it under GitHub Settings →
-   Applications.
+   Applications. The secret holds the login in opencode 1's `auth.json`
+   format, so one stored before the move to opencode 2 still works.
 3. Codex is not used: cgwalters uses opencode for OpenAI models, and Codex
    has no bot-specific token, only your own ChatGPT login.
 

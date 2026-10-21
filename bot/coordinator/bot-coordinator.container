@@ -18,8 +18,8 @@ Secret=jmarrero-bot-claude-token,type=env,target=CLAUDE_CODE_OAUTH_TOKEN
 # which is also the opencode coordinator backend's (see backends.toml).
 Secret=jmarrero-bot-copilot-auth,type=env,target=OPENCODE_AUTH_CONTENT
 Environment=BOT_OPENCODE_MODEL=github-copilot/gpt-6.1-sol
-# The opencode coordinator's second model family, for reviews (its
-# opencode.json reads it).
+# The opencode coordinator's second model family, for reviews (backends.toml
+# passes it on).
 Environment=BOT_OPENCODE_REVIEW_MODEL=github-copilot/claude-sonnet-5.5
 # The persistent home: clones, Claude's sessions, caches, devspace keys.
 # No keep-id: the container's users map to subordinate ids, not to you.

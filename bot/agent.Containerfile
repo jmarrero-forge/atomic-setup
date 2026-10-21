@@ -16,16 +16,23 @@ RUN dnf install -y \
     dnf clean all
 
 # opencode is pinned to the version the coordinator's opencode backend was
-# tested with: its Copilot provider pin and its builder agent's rules rest on
-# how opencode merges its config sources. Before each bump, re-run the
-# coordinator image's config check, which plants config of each kind and
-# sends the TUI a SIGUSR2 (config reload). It arrives with
-# jmarrero/atomic-setup#18 (bot/coordinator/check-opencode-config.py); once
-# that is merged:
+# tested with: its Copilot provider pin, its policies and its builder
+# agent's rules rest on how opencode merges its config sources. Before each
+# bump, re-run the coordinator image's config check, which plants config of
+# each kind, with and without the loop's pre-start clean, and plants more
+# into a running server (opencode reloads config files as they change):
 #   podman run --rm --entrypoint python3 localhost/bot-coordinator \
 #       /usr/local/share/bot-coordinator/check-opencode-config.py
-RUN npm install -g @anthropic-ai/claude-code @openai/codex @github/copilot opencode-ai@1.19.0 && \
+RUN npm install -g @anthropic-ai/claude-code @openai/codex @github/copilot @opencode/cli@2.1.1 && \
     npm cache clean --force
+# opencode 2 no longer reads OPENCODE_AUTH_CONTENT: this runs it with that
+# login (see the script).
+COPY --chmod=755 opencode-copilot /usr/local/bin/opencode-copilot
+# opencode's own update check reads only the global config, which a job or
+# session can write; the npm install isn't the agent user's to replace anyway.
+# Its database's name, which would otherwise depend on the release channel:
+# opencode-copilot and the coordinator's archive scrub look for this one.
+ENV OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DB=opencode.db
 
 # The bot's commit identity, for any commit made in a job.
 RUN git config --system user.name "Joseph Marrero" && \

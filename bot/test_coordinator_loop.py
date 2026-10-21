@@ -613,24 +613,43 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(opencode.notes, os.path.join(here, "backend-opencode.md"))
         # The quadlet's environment.
         env = {"CLAUDE_CODE_OAUTH_TOKEN": "t", "OPENCODE_AUTH_CONTENT": "{}", "COORDINATOR_MODEL": "m",
-               "COORDINATOR_EFFORT": "high", "COORDINATOR_PROMPT": "Load it", "BOT_OPENCODE_MODEL": "gh/gpt"}
+               "COORDINATOR_EFFORT": "high", "COORDINATOR_PROMPT": "Load it", "BOT_OPENCODE_MODEL": "gh/gpt",
+               "BOT_OPENCODE_REVIEW_MODEL": "gh/claude"}
         self.assertEqual(claude.argv(env), ["claude", "--dangerously-skip-permissions", "--model", "m",
                                             "--effort", "high", "Load it"])
-        self.assertEqual(opencode.argv(env), ["opencode", "--auto", "--model", "gh/gpt", "--prompt", "Load it"])
-        # Its config is the image's managed /etc/opencode, which nothing the session writes overrides.
-        self.assertEqual(opencode.session_env(env), {"OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS": "true",
-                                                    "OPENCODE_DISABLE_PROJECT_CONFIG": "true"})
+        # Its own server, not opencode's shared background one; the login through opencode-copilot.
+        self.assertEqual(opencode.argv(env), ["opencode-copilot", "--standalone", "--auto", "--prompt", "Load it"])
+        # Its config is the image's /etc/opencode, which nothing the session writes overrides; the
+        # models (the TUI has no --model) from OPENCODE_CONFIG_CONTENT.
+        session_env = opencode.session_env(env)
+        self.assertEqual(session_env["OPENCODE_DISABLE_PROJECT_CONFIG"], "true")
+        self.assertEqual(json.loads(session_env.pop("OPENCODE_CONFIG_CONTENT")),
+                         {"model": "gh/gpt", "agents": {"second-opinion": {"model": "gh/claude"}}})
+        self.assertEqual(set(session_env), {"OPENCODE_DISABLE_PROJECT_CONFIG"})
         self.assertEqual(opencode.clean, ["~/.opencode", "${XDG_CONFIG_HOME:-~/.config}/opencode",
-                                          "${XDG_CACHE_HOME:-~/.cache}/opencode"])
+                                          "${XDG_CACHE_HOME:-~/.cache}/opencode",
+                                          "${XDG_STATE_HOME:-~/.local/state}/opencode"])
         self.assertEqual((opencode.archive, opencode.keep, opencode.relink), (
             ["${XDG_DATA_HOME:-~/.local/share}/opencode"], ["${XDG_DATA_HOME:-~/.local/share}/opencode/auth.json"],
             {"${XDG_CONFIG_HOME:-~/.config}/opencode/AGENTS.md": "~/.local/share/bot-skills/AGENTS.md"}))
+        # The logins and accounts opencode 2 keeps in its database.
+        self.assertEqual(opencode.scrub, {"opencode.db": ["credential", "account", "control_account"]})
         self.assertTrue(claude.proved_by_reading)
         conf = json.loads(occ.render())
-        self.assertEqual(conf["agent"]["second-opinion"]["model"], "{env:BOT_OPENCODE_REVIEW_MODEL}")
-        self.assertEqual((conf["enabled_providers"], conf["autoupdate"], conf["share"], conf["permission"]),
-                         (["github-copilot"], False, "disabled", {"question": "deny"}))
-        self.assertIn("git fetch origin pull/N/head", conf["agent"]["builder"]["prompt"])
+        self.assertNotIn("model", conf["agents"]["second-opinion"])  # never an unset variable's empty model
+        self.assertEqual(conf["policies"], [
+            {"action": "provider.use", "resource": "*", "effect": "deny"},
+            {"action": "provider.use", "resource": "github-copilot", "effect": "allow"},
+            {"action": "integration.use", "resource": "plugin:*", "effect": "deny"},
+            {"action": "integration.use", "resource": "mcp:*", "effect": "deny"},
+            {"action": "tool.use", "resource": "question:*", "effect": "deny"}])
+        self.assertEqual((conf["update"], conf["share"], conf["permissions"], conf["shell"], conf["experimental"]),
+                         ("disable", "disabled", [{"action": "question", "resource": "*", "effect": "deny"}],
+                          "/bin/bash", {"portable_shell_scanner": False}))
+        self.assertIn("git fetch origin pull/N/head", conf["agents"]["builder"]["system"])
+        # The review model is the session's to have.
+        self.assertEqual(opencode.missing({k: v for k, v in env.items() if k != "BOT_OPENCODE_REVIEW_MODEL"}),
+                         "BOT_OPENCODE_REVIEW_MODEL is unset")
         # Without the Copilot login there is no failover, but Claude starts.
         self.assertEqual(opencode.missing({k: v for k, v in env.items() if k != "OPENCODE_AUTH_CONTENT"}),
                          "OPENCODE_AUTH_CONTENT is unset")
@@ -1567,7 +1586,7 @@ class LoopHandoffTest(LoopHarness):
 
 
 class BuilderRulesTest(unittest.TestCase):
-    """The opencode builder's bash rules, as opencode 1.18 applies them:
+    """The opencode builder's shell rules, as opencode 2 applies them:
     each command node's text against every pattern with Wildcard.match
     (packages/core/src/util/wildcard.ts: * is anything, ? one character, a
     trailing " *" may also match nothing), the last match winning."""
@@ -1591,12 +1610,17 @@ class BuilderRulesTest(unittest.TestCase):
 
     def test_what_the_builder_may_run(self):
         conf = json.loads(occ.render())
-        rules = list(conf["agent"]["builder"]["permission"]["bash"].items())
+        permissions = conf["agents"]["builder"]["permissions"]
+        self.assertEqual(permissions[0], {"action": "subagent", "resource": "*", "effect": "deny"})
+        self.assertEqual({r["action"] for r in permissions[1:]}, {"shell"})
+        rules = [(r["resource"], r["effect"]) for r in permissions[1:]]
         # Only denies after the "*" allow: an allow after them would let
         # through a denied command that mentions it.
         self.assertEqual(rules[0], ("*", "allow"))
         self.assertEqual({a for _, a in rules[1:]}, {"deny"})
-        self.assertEqual(conf["agent"]["builder"]["permission"]["task"], "deny")
+        # Each pattern once: the same 9725 as opencode 1's rules.
+        self.assertEqual(len({p for p, _ in rules}), len(rules))
+        self.assertEqual(len(rules) - 1, 9725)
         denied = [
             "git commit -m x", "git -C /x commit -m x", "git -c user.name=a commit", "git push origin HEAD", "git push",
             "git am < x.patch", "git cherry-pick abc", "git rebase main", "git pull", "git update-ref HEAD x",

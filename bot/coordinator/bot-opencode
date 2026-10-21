@@ -4,13 +4,15 @@
 # notes in the coordinator skill for when to use it.
 #
 #   bot-opencode [--model PROVIDER/MODEL] [--dir DIR] [--name NAME] PROMPT
+#   bot-opencode --models
 #
-# Runs `opencode run --auto` in DIR (default: the current directory) and
-# prints its final output; the whole run is kept in
-# ~/.local/state/bot-opencode/NAME-TIMESTAMP.log. Start it with the Bash
-# tool's run_in_background, so its exit wakes the session. The login comes
-# from OPENCODE_AUTH_CONTENT (a podman secret); the model from --model or
-# BOT_OPENCODE_MODEL.
+# Runs `opencode run --auto` in DIR (default: the current directory), on a
+# private server and database of its own, and prints its final output; the
+# whole run is kept in ~/.local/state/bot-opencode/NAME-TIMESTAMP.log. Start
+# it with the Bash tool's run_in_background, so its exit wakes the session.
+# The login comes from OPENCODE_AUTH_CONTENT (a podman secret, through
+# opencode-copilot); the model from --model or BOT_OPENCODE_MODEL, and
+# --models lists the ones it can use.
 set -euo pipefail
 
 model=${BOT_OPENCODE_MODEL:-github-copilot/gpt-6.1-sol}
@@ -26,17 +28,26 @@ while [ $# -gt 1 ]; do
         *) break ;;
     esac
 done
-[ $# -eq 1 ] || { sed -n '6,7p' "$0" | sed 's/^# //' >&2; exit 2; }
+[ $# -eq 1 ] || { sed -n '6,8p' "$0" | sed 's/^# //' >&2; exit 2; }
 : "${OPENCODE_AUTH_CONTENT:?no Copilot login (OPENCODE_AUTH_CONTENT)}"
 [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "bot-opencode: bad --name" >&2; exit 2; }
 
 logdir=$HOME/.local/state/bot-opencode
 mkdir -p "$logdir"
+# A database of its own, which opencode-copilot needs to hand it the login,
+# and which goes afterwards, since it holds the login: off the persistent
+# home, so that a killed run doesn't leave it there.
+db=$(mktemp -d "${TMPDIR:-/tmp}/bot-opencode.XXXXXX")
+trap 'rm -rf "$db"' EXIT
+if [ "$1" = --models ]; then
+    OPENCODE_DB=$db/opencode.db opencode-copilot models --standalone
+    exit
+fi
 log=$logdir/$name-$(date -u +%Y%m%dT%H%M%SZ).log
 echo "bot-opencode: $model in $dir; log $log" >&2
 cd "$dir"
 set +e
-opencode run --auto -m "$model" "$1" > >(tee "$log") 2>>"$log"
+OPENCODE_DB=$db/opencode.db opencode-copilot run --standalone --auto -m "$model" "$1" > >(tee "$log") 2>>"$log"
 rc=$?
 set -e
 echo "bot-opencode: exit $rc (log $log)" >&2

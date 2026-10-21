@@ -11,9 +11,9 @@ COPY --chmod=755 coordinator-loop.py /usr/local/bin/bot-coordinator-loop
 COPY operator-goals.md operator-notes.md backends.toml backend-opencode.md /usr/local/share/bot-coordinator/
 COPY --chmod=755 bot-opencode /usr/local/bin/bot-opencode
 COPY opencode-config.py check-opencode-config.py /usr/local/share/bot-coordinator/
-# opencode's config, generated, as its system-managed config: root-owned,
-# and loaded after every file the session could write (the base image runs
-# as agent).
+# opencode's config, generated, as its system config: root-owned, and
+# loaded after every file the session could write, its policies evaluated
+# last (the base image runs as agent).
 USER root
 RUN mkdir -p /etc/opencode && \
     python3 /usr/local/share/bot-coordinator/opencode-config.py /etc/opencode/opencode.json
